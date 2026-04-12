@@ -109,6 +109,17 @@ type ImageSource struct {
 	Bytes interface{} `json:"bytes"`
 }
 
+// reverseConvertToolID converts OpenAI-style "call_" IDs back to Kiro-native
+// "tooluse_" format. This is the inverse of to_ir.convertToolID and is required
+// so that tool_result IDs match the tool_use IDs that Kiro API originally issued.
+// Without this, Kiro cannot pair tool results with tool calls → infinite loop.
+func reverseConvertToolID(id string) string {
+	if strings.HasPrefix(id, "call_") {
+		return strings.Replace(id, "call_", "tooluse_", 1)
+	}
+	return id
+}
+
 // -- Conversion Logic --
 
 // remoteWebSearchDescription is a minimal fallback for when dynamic fetch from MCP tools/list hasn't completed yet.
@@ -118,6 +129,26 @@ const (
 	kiroMinThinkingBudget = 1024
 	kiroMaxThinkingBudget = 24576
 	kiroDefaultBudget     = 20000
+
+	// kiroUserPlaceholderToolResults is used when a user message contains only
+	// tool_result blocks with no text. Kiro API requires non-empty content.
+	// Matches kiro.rs behavior — descriptive but non-instructive.
+	kiroUserPlaceholderToolResults = "Tool results provided."
+
+	// kiroUserPlaceholderEmpty is used when a synthetic user message is needed
+	// (e.g., last message was assistant, Kiro expects user as CurrentMessage).
+	// Using "." avoids the model interpreting it as an instruction to keep working
+	// (which "Continue" caused) while remaining non-empty for the API.
+	kiroUserPlaceholderEmpty = "."
+
+	// kiroAssistantPlaceholder is used when inserting synthetic assistant messages
+	// for role alternation. Matches kiro.rs build_history behavior.
+	kiroAssistantPlaceholder = "OK"
+
+	// Chunked write/edit tool description suffixes (from kiro.rs converter.rs).
+	// Appended to Write/Edit tool descriptions to prevent output truncation on large files.
+	kiroWriteToolSuffix = "\n- IMPORTANT: If the content to write exceeds 150 lines, you MUST only write the first 50 lines using this tool, then use `Edit` tool to append the remaining content in chunks of no more than 50 lines each. If needed, leave a unique placeholder to help append content. Do NOT attempt to write all content at once."
+	kiroEditToolSuffix  = "\n- IMPORTANT: If the `new_string` content exceeds 50 lines, you MUST split it into multiple Edit calls, each replacing no more than 50 lines at a time. If used to append content, leave a unique placeholder to help append content. On the final chunk, do NOT include the placeholder."
 )
 
 // ConvertRequest converts UnifiedChatRequest to Kiro API JSON format.
@@ -142,6 +173,21 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 	}
 
 	history, currentMsg := processMessagesStruct(req.Messages, tools, req.Model, origin)
+
+	// Validate tool_use/tool_result pairing: remove orphaned tool_uses from history
+	// that have no matching tool_result anywhere (history + current message).
+	// This prevents Kiro API errors when compaction or truncation drops tool_result messages.
+	removeOrphanedToolUses(&history, &currentMsg)
+
+	// Ensure tools list includes placeholder definitions for any tool names
+	// referenced in history but missing from the current tools list.
+	// This prevents Kiro API errors when clients change tool sets between requests.
+	tools = ensurePlaceholderTools(tools, history)
+
+	// Re-attach tools to current message context if needed
+	if currentMsg.UserInputMessage.UserInputMessageContext != nil && len(tools) > 0 {
+		currentMsg.UserInputMessage.UserInputMessageContext.Tools = tools
+	}
 
 	// Inject system prompt
 	if systemPrompt != "" {
@@ -248,6 +294,15 @@ func ensureKiroInputSchema(parameters map[string]interface{}) map[string]interfa
 	}
 }
 
+// kiroChunkedWriteToolNames maps tool names (lowercase) to their description suffixes.
+var kiroChunkedWriteToolNames = map[string]string{
+	"write":         kiroWriteToolSuffix,
+	"write_to_file": kiroWriteToolSuffix,
+	"fswrite":       kiroWriteToolSuffix,
+	"edit":          kiroEditToolSuffix,
+	"apply_diff":    kiroEditToolSuffix,
+}
+
 func extractToolsStruct(irTools []ir.ToolDefinition) []ToolSpecification {
 	if len(irTools) == 0 {
 		return nil
@@ -267,6 +322,17 @@ func extractToolsStruct(irTools []ir.ToolDefinition) []ToolSpecification {
 			name = "remote_web_search"
 			if description == "" {
 				description = remoteWebSearchDescription
+			}
+		}
+
+		// Append chunked write/edit instructions to tool descriptions (kiro.rs approach).
+		// This prevents output truncation on large file operations.
+		if suffix, ok := kiroChunkedWriteToolNames[strings.ToLower(name)]; ok {
+			description += suffix
+			// Kiro API limits tool descriptions to 10000 chars
+			if len([]rune(description)) > 10000 {
+				runes := []rune(description)
+				description = string(runes[:10000])
 			}
 		}
 
@@ -432,6 +498,118 @@ func filterToolResultsByKnownToolUseIDs(toolResults []ToolResult, validToolUseID
 	return filtered
 }
 
+// removeOrphanedToolUses performs bidirectional tool_use/tool_result pairing validation.
+// It collects all tool_result IDs from both history and current message, then removes
+// any tool_use entries from assistant messages in history that have no matching tool_result.
+// This prevents Kiro API errors when compaction or truncation drops tool_result messages.
+func removeOrphanedToolUses(history *[]HistoryMessage, currentMsg *CurrentMessage) {
+	if history == nil || len(*history) == 0 {
+		return
+	}
+
+	// Collect all tool_result IDs from history user messages
+	allToolResultIDs := make(map[string]struct{})
+	for _, msg := range *history {
+		if msg.UserInputMessage == nil || msg.UserInputMessage.UserInputMessageContext == nil {
+			continue
+		}
+		for _, tr := range msg.UserInputMessage.UserInputMessageContext.ToolResults {
+			id := strings.TrimSpace(tr.ToolUseId)
+			if id != "" {
+				allToolResultIDs[id] = struct{}{}
+			}
+		}
+	}
+
+	// Collect tool_result IDs from current message
+	if currentMsg != nil && currentMsg.UserInputMessage.UserInputMessageContext != nil {
+		for _, tr := range currentMsg.UserInputMessage.UserInputMessageContext.ToolResults {
+			id := strings.TrimSpace(tr.ToolUseId)
+			if id != "" {
+				allToolResultIDs[id] = struct{}{}
+			}
+		}
+	}
+
+	// Remove orphaned tool_uses from assistant messages
+	for i := range *history {
+		msg := &(*history)[i]
+		if msg.AssistantResponseMessage == nil || len(msg.AssistantResponseMessage.ToolUses) == 0 {
+			continue
+		}
+		filtered := make([]ToolUse, 0, len(msg.AssistantResponseMessage.ToolUses))
+		for _, tu := range msg.AssistantResponseMessage.ToolUses {
+			id := strings.TrimSpace(tu.ToolUseId)
+			if _, paired := allToolResultIDs[id]; paired {
+				filtered = append(filtered, tu)
+			}
+		}
+		// Only update if we actually removed something.
+		// Keep nil (not empty slice) when all tool_uses were orphaned,
+		// so Kiro API doesn't receive an empty toolUses array.
+		if len(filtered) < len(msg.AssistantResponseMessage.ToolUses) {
+			if len(filtered) == 0 {
+				msg.AssistantResponseMessage.ToolUses = nil
+			} else {
+				msg.AssistantResponseMessage.ToolUses = filtered
+			}
+		}
+	}
+}
+
+// ensurePlaceholderTools creates placeholder tool definitions for any tool names
+// referenced in history assistant messages (via tool_use) but missing from the
+// current tools list. This prevents Kiro API errors when clients change their
+// tool set between requests (e.g., after compaction or plugin changes).
+func ensurePlaceholderTools(tools []ToolSpecification, history []HistoryMessage) []ToolSpecification {
+	if len(history) == 0 {
+		return tools
+	}
+
+	// Collect existing tool names (case-insensitive)
+	existingNames := make(map[string]struct{}, len(tools))
+	for _, t := range tools {
+		existingNames[strings.ToLower(t.ToolSpecification.Name)] = struct{}{}
+	}
+
+	// Collect tool names from history assistant messages
+	needed := make(map[string]struct{})
+	for _, msg := range history {
+		if msg.AssistantResponseMessage == nil {
+			continue
+		}
+		for _, tu := range msg.AssistantResponseMessage.ToolUses {
+			name := strings.TrimSpace(tu.Name)
+			if name == "" {
+				continue
+			}
+			if _, exists := existingNames[strings.ToLower(name)]; !exists {
+				needed[name] = struct{}{}
+			}
+		}
+	}
+
+	if len(needed) == 0 {
+		return tools
+	}
+
+	// Create placeholder definitions for missing tools
+	for name := range needed {
+		tools = append(tools, ToolSpecification{
+			ToolSpecification: ToolSpecDetails{
+				Name:        name,
+				Description: "Tool used in conversation history.",
+				InputSchema: ToolInputSchema{Json: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				}},
+			},
+		})
+	}
+
+	return tools
+}
+
 func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) ([]HistoryMessage, CurrentMessage) {
 	nonSystem := filterSystemMessages(messages)
 	nonSystem = mergeConsecutiveMessages(nonSystem)
@@ -445,7 +623,7 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 	if len(nonSystem) > 0 && nonSystem[0].Role == ir.RoleAssistant {
 		placeholder := ir.Message{
 			Role:    ir.RoleUser,
-			Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "."}},
+			Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: kiroUserPlaceholderEmpty}},
 		}
 		nonSystem = append([]ir.Message{placeholder}, nonSystem...)
 	}
@@ -454,7 +632,7 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 		// Fallback for empty conversation
 		return []HistoryMessage{}, CurrentMessage{
 			UserInputMessage: UserInputMessage{
-				Content: "Continue",
+				Content: kiroUserPlaceholderEmpty,
 				ModelId: modelID,
 				Origin:  origin,
 			},
@@ -488,9 +666,10 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 		currentMsg = buildMergedToolResultMessageStruct(nonSystem[trailingStart:], tools, modelID, origin)
 	} else {
 		// Last was Assistant? Kiro expects UserInput as CurrentMessage.
-		// If last was Assistant, we force a "Continue" user message.
+		// Use "." — non-instructive placeholder. "Continue" caused model to loop
+		// by interpreting it as an instruction to keep working.
 		currentMsg = UserInputMessage{
-			Content: "Continue",
+			Content: kiroUserPlaceholderEmpty,
 			ModelId: modelID,
 			Origin:  origin,
 		}
@@ -541,9 +720,9 @@ func buildUserMessageStruct(msg ir.Message, tools []ToolSpecification, modelID, 
 	// This commonly happens in compaction requests from OpenCode.
 	if strings.TrimSpace(content) == "" {
 		if len(toolResults) > 0 {
-			content = "Tool results provided."
+			content = kiroUserPlaceholderToolResults
 		} else {
-			content = "Continue"
+			content = kiroUserPlaceholderEmpty
 		}
 	}
 
@@ -586,7 +765,7 @@ func buildAssistantMessageStruct(msg ir.Message) *AssistantResponseMessage {
 			name = "remote_web_search"
 		}
 		toolUses = append(toolUses, ToolUse{
-			ToolUseId: tc.ID,
+			ToolUseId: reverseConvertToolID(tc.ID),
 			Name:      name,
 			Input:     ir.ParseToolCallArgs(tc.Args),
 		})
@@ -596,9 +775,13 @@ func buildAssistantMessageStruct(msg ir.Message) *AssistantResponseMessage {
 	if content == "" {
 		// Kiro API requires non-empty assistant content.
 		// This happens in compaction/tool-only assistant turns.
-		// IMPORTANT: Use a minimal neutral string that the model won't mimic in responses.
-		// Previously "I'll help you with that." / "I understand." caused the model to parrot them back.
-		content = "."
+		// Use " " (space) for tool-use-only messages (matches kiro.rs:793),
+		// "." for messages with no content at all.
+		if len(toolUses) > 0 {
+			content = " "
+		} else {
+			content = "."
+		}
 	}
 
 	return &AssistantResponseMessage{
@@ -619,7 +802,7 @@ func buildToolResultMessageStruct(msg ir.Message, modelID, origin string) *UserI
 	}
 
 	return &UserInputMessage{
-		Content: "Continue",
+		Content: kiroUserPlaceholderToolResults,
 		ModelId: modelID,
 		Origin:  origin,
 		UserInputMessageContext: &UserInputMessageContext{
@@ -642,7 +825,7 @@ func buildMergedToolResultMessageStruct(msgs []ir.Message, tools []ToolSpecifica
 		}
 	}
 
-	content := "Continue"
+	content := kiroUserPlaceholderToolResults
 	if len(textParts) > 0 {
 		content = strings.Join(textParts, "\n")
 	}
@@ -664,7 +847,7 @@ func buildMergedToolResultMessageStruct(msgs []ir.Message, tools []ToolSpecifica
 
 func buildToolResultStruct(tr *ir.ToolResultPart) ToolResult {
 	return ToolResult{
-		ToolUseId: tr.ToolCallID,
+		ToolUseId: reverseConvertToolID(tr.ToolCallID),
 		Status:    "success",
 		Content: []ToolResultContent{
 			{Text: ir.SanitizeText(tr.Result)},
@@ -763,9 +946,9 @@ func alternateRoles(messages []ir.Message) []ir.Message {
 			prev, curr := messages[i-1].Role, msg.Role
 			isUserLike := func(r ir.Role) bool { return r == ir.RoleUser || r == ir.RoleTool }
 			if isUserLike(prev) && isUserLike(curr) {
-				alternated = append(alternated, ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "[Continued]"}}})
+				alternated = append(alternated, ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: kiroAssistantPlaceholder}}})
 			} else if prev == ir.RoleAssistant && curr == ir.RoleAssistant {
-				alternated = append(alternated, ir.Message{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Continue"}}})
+				alternated = append(alternated, ir.Message{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: kiroUserPlaceholderEmpty}}})
 			}
 		}
 		alternated = append(alternated, msg)

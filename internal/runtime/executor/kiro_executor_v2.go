@@ -68,30 +68,17 @@ const (
 	// Kiro-specific headers (match upstream executor behavior)
 	kiroAgentModeHeaderV2 = "vibe"
 
-	// kiroAgenticSystemPrompt prevents AWS Kiro API timeouts during large file operations.
-	kiroAgenticSystemPrompt = `
- # CRITICAL: CHUNKED WRITE PROTOCOL (MANDATORY)
- 
- You MUST follow these rules for ALL file operations. Violation causes server timeouts and task failure.
- 
- ## ABSOLUTE LIMITS
- - **MAXIMUM 350 LINES** per single write/edit operation - NO EXCEPTIONS
- - **RECOMMENDED 300 LINES** or less for optimal performance
- - **NEVER** write entire files in one operation if >300 lines
- 
- ## MANDATORY CHUNKED WRITE STRATEGY
- 
- ### For NEW FILES (>300 lines total):
- 1. FIRST: Write initial chunk (first 250-300 lines) using write_to_file/fsWrite
- 2. THEN: Append remaining content in 250-300 line chunks using file append operations
- 3. REPEAT: Continue appending until complete
- 
- ### For EDITING EXISTING FILES:
- 1. Use surgical edits (apply_diff/targeted edits) - change ONLY what's needed
- 2. NEVER rewrite entire files - use incremental modifications
- 3. Split large refactors into multiple small, focused edits
- 
- REMEMBER: When in doubt, write LESS per operation. Multiple small operations > one large operation.`
+	// kiroAgenticSystemPrompt is a lightweight chunked-write policy reminder.
+	// The actual line-limit instructions are injected into Write/Edit tool descriptions
+	// (see from_ir/kiro.go extractToolsStruct). This system-level hint reinforces silent compliance.
+	kiroAgenticSystemPrompt = `When the Write or Edit tool has content size limits, always comply silently. Never suggest bypassing these limits via alternative tools. Never ask the user whether to switch approaches. Complete all chunked operations without commentary.`
+
+	// kiroAntiLoopPrompt is injected for ALL models (not just -agentic) to prevent
+	// the model from looping on side-effect tools like todowrite.
+	// OpenCode's system prompt aggressively instructs "Use TodoWrite VERY frequently",
+	// which causes the model to call todowrite after every tool_result, creating an
+	// infinite loop. This prompt counteracts that by setting a hard rule.
+	kiroAntiLoopPrompt = `CRITICAL ANTI-LOOP RULE: Never call todowrite (or any planning/tracking tool) more than once per turn. After receiving a tool_result for todowrite, you MUST either: (a) call a different substantive tool (read, edit, write, bash, glob, grep, task), or (b) respond to the user with text only. Repeatedly calling todowrite without substantive work between calls is a bug — stop and move on.`
 )
 
 // kiroModelMapping maps model IDs to Kiro API model IDs.
@@ -649,7 +636,13 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 	// Preserve origin for quota routing (CLI vs AI_EDITOR) in Kiro request body.
 	rc.irReq.Metadata["origin"] = rc.origin
 
-	// Inject agentic system prompt if needed
+	// Inject anti-loop prompt for ALL models to prevent todowrite cycling.
+	// OpenCode's system prompt aggressively instructs "Use TodoWrite VERY frequently",
+	// which causes the model to call todowrite after every tool_result in a loop.
+	// This must be injected for all models, not just -agentic variants.
+	e.injectAntiLoopPrompt(rc.irReq)
+
+	// Inject agentic system prompt if needed (chunked write policy)
 	if rc.isAgentic {
 		e.injectAgenticPrompt(rc.irReq)
 	}
@@ -716,6 +709,32 @@ func (e *KiroExecutorV2) injectAgenticPrompt(req *ir.UnifiedChatRequest) {
 		Content: []ir.ContentPart{{
 			Type: ir.ContentTypeText,
 			Text: kiroAgenticSystemPrompt,
+		}},
+	}
+	req.Messages = append([]ir.Message{systemMsg}, req.Messages...)
+}
+
+func (e *KiroExecutorV2) injectAntiLoopPrompt(req *ir.UnifiedChatRequest) {
+	// Prepend anti-loop hint to the BEGINNING of system message.
+	// OpenCode's system prompt aggressively instructs "Use TodoWrite VERY frequently"
+	// early in the prompt. By prepending our anti-loop rule, it takes priority
+	// over the later "use frequently" instructions.
+	for i, msg := range req.Messages {
+		if msg.Role == ir.RoleSystem {
+			for j, part := range msg.Content {
+				if part.Type == ir.ContentTypeText {
+					req.Messages[i].Content[j].Text = kiroAntiLoopPrompt + "\n\n" + req.Messages[i].Content[j].Text
+					return
+				}
+			}
+		}
+	}
+	// No system message found, prepend one
+	systemMsg := ir.Message{
+		Role: ir.RoleSystem,
+		Content: []ir.ContentPart{{
+			Type: ir.ContentTypeText,
+			Text: kiroAntiLoopPrompt,
 		}},
 	}
 	req.Messages = append([]ir.Message{systemMsg}, req.Messages...)
