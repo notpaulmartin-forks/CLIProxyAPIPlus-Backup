@@ -49,6 +49,7 @@ log_analyzer.go
 .agents/*
 .opencode/*
 .idea/*
+.beads/*
 .bmad/*
 _bmad/*
 _bmad-output/*

@@ -192,6 +192,7 @@ func main() {
 		gitStoreRemoteURL    string
 		gitStoreUser         string
 		gitStorePassword     string
+		gitStoreBranch       string
 		gitStoreLocalPath    string
 		gitStoreInst         *store.GitTokenStore
 		gitStoreRoot         string
@@ -260,6 +261,9 @@ func main() {
 	}
 	if value, ok := lookupEnv("GITSTORE_LOCAL_PATH", "gitstore_local_path"); ok {
 		gitStoreLocalPath = value
+	}
+	if value, ok := lookupEnv("GITSTORE_GIT_BRANCH", "gitstore_git_branch"); ok {
+		gitStoreBranch = value
 	}
 	if value, ok := lookupEnv("OBJECTSTORE_ENDPOINT", "objectstore_endpoint"); ok {
 		useObjectStore = true
@@ -395,7 +399,7 @@ func main() {
 		}
 		gitStoreRoot = filepath.Join(gitStoreLocalPath, "gitstore")
 		authDir := filepath.Join(gitStoreRoot, "auths")
-		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword)
+		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreBranch)
 		gitStoreInst.SetBaseDir(authDir)
 		if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
 			log.Errorf("failed to prepare git token store: %v", errRepo)
@@ -562,7 +566,11 @@ func main() {
 		// and don't share config with StartService (which is in the else branch)
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
-		cmd.DoKiroLogin(cfg, options)
+		if kiroGoogleLogin {
+			cmd.DoKiroGoogleLogin(cfg, options)
+		} else {
+			cmd.DoKiroLogin(cfg, options)
+		}
 	} else if kiroAWSLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
 		// Users can explicitly override with --no-incognito
