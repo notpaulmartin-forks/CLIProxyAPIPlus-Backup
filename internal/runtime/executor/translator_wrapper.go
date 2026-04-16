@@ -65,6 +65,9 @@ type OpenAIStreamState = UnifiedStreamState
 func NewAntigravityStreamState(originalRequest []byte) *UnifiedStreamState {
 	s := &UnifiedStreamState{}
 	s.EnsureInitialized()
+	if sessionID := from_ir.DeriveSessionID(originalRequest); sessionID != "" {
+		s.ClaudeState = from_ir.NewClaudeStreamStateWithSessionID(sessionID)
+	}
 	s.SanitizedToolNameMap = util.SanitizedToolNameMap(originalRequest)
 	return s
 }

@@ -1179,7 +1179,11 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 	// Create Claude stream state if needed
 	var claudeState *from_ir.ClaudeStreamState
 	if sourceFormat == "claude" {
-		claudeState = from_ir.NewClaudeStreamState()
+		if sessionID := from_ir.DeriveSessionID(requestPayload); sessionID != "" {
+			claudeState = from_ir.NewClaudeStreamStateWithSessionID(sessionID)
+		} else {
+			claudeState = from_ir.NewClaudeStreamState()
+		}
 	}
 
 	for scanner.Scan() {

@@ -200,6 +200,19 @@ func (e *AntigravityExecutorV2) HttpRequest(ctx context.Context, auth *cliproxya
 
 func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if inCooldown, remaining := antigravityIsInShortCooldown(auth, baseModel, time.Now()); inCooldown {
+		log.Debugf("antigravity v2 executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
+		d := remaining
+		return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+	}
+
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	if errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload); errValidate != nil {
+		return resp, errValidate
+	}
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
@@ -318,8 +331,31 @@ attemptLoop:
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				lastStatus = httpResp.StatusCode
 				lastBody = data
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					decision := decideAntigravity429(data)
+					switch decision.kind {
+					case antigravity429DecisionInstantRetrySameAuth:
+						if attempt+1 < attempts {
+							if decision.retryAfter != nil && *decision.retryAfter > 0 {
+								wait := antigravityInstantRetryDelay(*decision.retryAfter)
+								log.Debugf("antigravity v2 executor: instant retry for model %s, waiting %s", baseModel, wait)
+								if errWait := antigravityWait(ctx, wait); errWait != nil {
+									return resp, errWait
+								}
+							}
+							continue attemptLoop
+						}
+					case antigravity429DecisionShortCooldownSwitchAuth:
+						if decision.retryAfter != nil && *decision.retryAfter > 0 {
+							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							log.Debugf("antigravity v2 executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
+						}
+						break
+					default:
+						if idx+1 < len(baseURLs) {
+							continue
+						}
+					}
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, data) {
 					if idx+1 < len(baseURLs) {
@@ -334,6 +370,22 @@ attemptLoop:
 						}
 						continue attemptLoop
 					}
+				}
+				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, data) && attempt+1 < attempts {
+					delay := antigravityTransient429RetryDelay(attempt)
+					log.Debugf("antigravity v2 executor: transient 429 resource exhausted for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return resp, errWait
+					}
+					continue attemptLoop
+				}
+				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, data) && attempt+1 < attempts {
+					delay := antigravitySoftRateLimitDelay(attempt)
+					log.Debugf("antigravity v2 executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return resp, errWait
+					}
+					continue attemptLoop
 				}
 				break
 			}
@@ -379,6 +431,19 @@ attemptLoop:
 
 func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if inCooldown, remaining := antigravityIsInShortCooldown(auth, baseModel, time.Now()); inCooldown {
+		log.Debugf("antigravity v2 executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
+		d := remaining
+		return nil, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+	}
+
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	if errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload); errValidate != nil {
+		return nil, errValidate
+	}
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
@@ -480,8 +545,31 @@ attemptLoop:
 				appendAPIResponseChunk(ctx, e.cfg, data)
 				lastStatus = httpResp.StatusCode
 				lastBody = data
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					decision := decideAntigravity429(data)
+					switch decision.kind {
+					case antigravity429DecisionInstantRetrySameAuth:
+						if attempt+1 < attempts {
+							if decision.retryAfter != nil && *decision.retryAfter > 0 {
+								wait := antigravityInstantRetryDelay(*decision.retryAfter)
+								log.Debugf("antigravity v2 executor: instant retry for model %s, waiting %s", baseModel, wait)
+								if errWait := antigravityWait(ctx, wait); errWait != nil {
+									return nil, errWait
+								}
+							}
+							continue attemptLoop
+						}
+					case antigravity429DecisionShortCooldownSwitchAuth:
+						if decision.retryAfter != nil && *decision.retryAfter > 0 {
+							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							log.Debugf("antigravity v2 executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
+						}
+						break
+					default:
+						if idx+1 < len(baseURLs) {
+							continue
+						}
+					}
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, data) {
 					if idx+1 < len(baseURLs) {
@@ -496,6 +584,22 @@ attemptLoop:
 						}
 						continue attemptLoop
 					}
+				}
+				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, data) && attempt+1 < attempts {
+					delay := antigravityTransient429RetryDelay(attempt)
+					log.Debugf("antigravity v2 executor: transient 429 resource exhausted for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					continue attemptLoop
+				}
+				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, data) && attempt+1 < attempts {
+					delay := antigravitySoftRateLimitDelay(attempt)
+					log.Debugf("antigravity v2 executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					continue attemptLoop
 				}
 				break
 			}
@@ -617,6 +721,13 @@ func (e *AntigravityExecutorV2) Refresh(ctx context.Context, auth *cliproxyauth.
 }
 
 func (e *AntigravityExecutorV2) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	if errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload); errValidate != nil {
+		return cliproxyexecutor.Response{}, errValidate
+	}
 	// For now, call the upstream endpoint using the same request translation as legacy.
 	// This does not affect the canonical chat flow and can be refactored later.
 	old := NewAntigravityExecutor(e.cfg)

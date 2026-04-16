@@ -71,9 +71,14 @@ func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Fo
 	if state == nil {
 		switch provider {
 		case "gemini", "gemini-cli", "antigravity", "aistudio":
-			state = &executor.GeminiCLIStreamState{ClaudeState: from_ir.NewClaudeStreamState()}
+			state = executor.NewAntigravityStreamState(originalRequestRawJSON)
 		case "claude":
-			state = from_ir.NewClaudeStreamState()
+			sessionID := from_ir.DeriveSessionID(originalRequestRawJSON)
+			if sessionID != "" {
+				state = from_ir.NewClaudeStreamStateWithSessionID(sessionID)
+			} else {
+				state = from_ir.NewClaudeStreamState()
+			}
 		case "openai", "openai-response", "codex", "ollama", "codebuddy", "cursor":
 			state = &executor.OpenAIStreamState{}
 		default:

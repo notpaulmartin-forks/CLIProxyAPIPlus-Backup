@@ -1140,13 +1140,13 @@ func handleFinishEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextS
 
 	usageMap := buildUsageMapForResponses(event.Usage)
 	b, _ := json.Marshal(map[string]interface{}{
-		"type": "response.done", "sequence_number": nextSeq(),
+		"type": "response.completed", "sequence_number": nextSeq(),
 		"response": map[string]interface{}{
 			"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "completed",
 			"usage": usageMap,
 		},
 	})
-	out = append(out, fmt.Sprintf("event: response.done\ndata: %s\n\n", string(b)))
+	out = append(out, fmt.Sprintf("event: response.completed\ndata: %s\n\n", string(b)))
 	return out
 }
 
