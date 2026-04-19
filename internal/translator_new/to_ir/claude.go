@@ -89,12 +89,19 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	if system := parsed.Get("system"); system.Exists() {
 		var systemText string
 		if system.Type == gjson.String {
-			systemText = system.String()
+			text := system.String()
+			if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+				systemText = text
+			}
 		} else if system.IsArray() {
 			var parts []string
 			for _, part := range system.Array() {
 				if part.Get("type").String() == "text" {
-					parts = append(parts, part.Get("text").String())
+					text := part.Get("text").String()
+					if strings.HasPrefix(text, "x-anthropic-billing-header:") {
+						continue
+					}
+					parts = append(parts, text)
 				}
 			}
 			systemText = strings.Join(parts, "\n")
@@ -228,12 +235,16 @@ func parseClaudeMessage(m gjson.Result) ir.Message {
 				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: block.Get("text").String()})
 			case "thinking":
 				// Extract thinking text - handle both simple string and wrapped object formats
-				thinkingText := block.Get("thinking").String()
+				thinkingField := block.Get("thinking")
+				thinkingText := ""
+				if thinkingField.Type == gjson.String {
+					thinkingText = thinkingField.String()
+				} else if inner := block.Get("thinking.text"); inner.Exists() {
+					// Wrapped format: {"thinking": {"text": "...", "cache_control": {...}}}
+					thinkingText = inner.String()
+				}
 				if thinkingText == "" {
-					// Try wrapped format: {"thinking": {"text": "...", "cache_control": {...}}}
-					if inner := block.Get("thinking.text"); inner.Exists() {
-						thinkingText = inner.String()
-					}
+					continue
 				}
 				msg.Content = append(msg.Content, ir.ContentPart{
 					Type:             ir.ContentTypeReasoning,

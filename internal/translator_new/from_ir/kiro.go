@@ -614,7 +614,6 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 	nonSystem := filterSystemMessages(messages)
 	nonSystem = mergeConsecutiveMessages(nonSystem)
 	nonSystem = removePrefill(nonSystem)
-	nonSystem = alternateRoles(nonSystem)
 
 	// FIX: Kiro API requires history to start with a user message.
 	// Some clients (e.g., OpenClaw) send conversations starting with an assistant message,
@@ -639,45 +638,112 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 		}
 	}
 
-	// Check logic for last message
-	lastMsg := nonSystem[len(nonSystem)-1]
-
-	// If last is User, it's CurrentMessage. Rest is history.
-	if lastMsg.Role == ir.RoleUser {
-		history := buildHistoryStruct(nonSystem[:len(nonSystem)-1], tools, modelID, origin)
-		history = truncateHistoryIfNeeded(history)
-		current := buildUserMessageStruct(lastMsg, tools, modelID, origin, true)
-		return history, CurrentMessage{UserInputMessage: *current}
-	}
-
-	// If last uses tools or is assistant, we might be in a flow.
-	// But usually the request to Kiro implies *User* is sending something (or Tool Result).
-
-	// Handle trailing tool messages (User role in Kiro IR, but Tool in Unified IR)
-	trailingStart := findTrailingStart(nonSystem)
-
-	history := buildHistoryStruct(nonSystem[:trailingStart], tools, modelID, origin)
-	history = truncateHistoryIfNeeded(history)
-
+	history := make([]HistoryMessage, 0, len(nonSystem))
+	var pendingToolResults []ToolResult
 	var currentMsg UserInputMessage
+	hasCurrent := false
 
-	if trailingStart < len(nonSystem) {
-		// We have tool results at the end
-		currentMsg = buildMergedToolResultMessageStruct(nonSystem[trailingStart:], tools, modelID, origin)
-	} else {
-		// Last was Assistant? Kiro expects UserInput as CurrentMessage.
-		// Use "." — non-instructive placeholder. "Continue" caused model to loop
-		// by interpreting it as an instruction to keep working.
-		currentMsg = UserInputMessage{
-			Content: kiroUserPlaceholderEmpty,
-			ModelId: modelID,
-			Origin:  origin,
+	for i, msg := range nonSystem {
+		isLast := i == len(nonSystem)-1
+
+		switch msg.Role {
+		case ir.RoleUser:
+			userMsg := buildUserMessageStruct(msg, tools, modelID, origin, isLast)
+			if len(pendingToolResults) > 0 {
+				mergePendingToolResultsIntoUser(userMsg, pendingToolResults)
+				pendingToolResults = nil
+			}
+			if isLast {
+				currentMsg = *userMsg
+				hasCurrent = true
+			} else {
+				history = append(history, HistoryMessage{UserInputMessage: userMsg})
+			}
+
+		case ir.RoleAssistant:
+			if len(pendingToolResults) > 0 {
+				history = append(history, HistoryMessage{UserInputMessage: syntheticToolResultHistoryMessage(pendingToolResults, modelID, origin)})
+				pendingToolResults = nil
+			}
+
+			assistantMsg := buildAssistantMessageStruct(msg)
+			history = append(history, HistoryMessage{AssistantResponseMessage: assistantMsg})
+			if isLast {
+				currentMsg = UserInputMessage{
+					Content: kiroUserPlaceholderEmpty,
+					ModelId: modelID,
+					Origin:  origin,
+				}
+				hasCurrent = true
+			}
+
+		case ir.RoleTool:
+			pendingToolResults = append(pendingToolResults, collectToolResults(msg)...)
+			if isLast {
+				currentMsg = buildMergedToolResultMessageStruct(nonSystem[i:], tools, modelID, origin)
+				hasCurrent = true
+			}
 		}
 	}
 
+	if !hasCurrent {
+		if len(pendingToolResults) > 0 {
+			currentMsg = UserInputMessage{
+				Content:                 kiroUserPlaceholderToolResults,
+				ModelId:                 modelID,
+				Origin:                  origin,
+				UserInputMessageContext: &UserInputMessageContext{ToolResults: pendingToolResults},
+			}
+		} else {
+			currentMsg = UserInputMessage{
+				Content: kiroUserPlaceholderEmpty,
+				ModelId: modelID,
+				Origin:  origin,
+			}
+		}
+	}
+
+	history = truncateHistoryIfNeeded(history)
 	wrappedCurrent := CurrentMessage{UserInputMessage: currentMsg}
 	sanitizeCurrentToolResults(&wrappedCurrent, history)
 	return history, wrappedCurrent
+}
+
+func collectToolResults(msg ir.Message) []ToolResult {
+	var toolResults []ToolResult
+	for _, part := range msg.Content {
+		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+			toolResults = append(toolResults, buildToolResultStruct(part.ToolResult))
+		}
+	}
+	return toolResults
+}
+
+func mergePendingToolResultsIntoUser(userMsg *UserInputMessage, pending []ToolResult) {
+	if userMsg == nil || len(pending) == 0 {
+		return
+	}
+	if userMsg.UserInputMessageContext == nil {
+		userMsg.UserInputMessageContext = &UserInputMessageContext{}
+	}
+	userMsg.UserInputMessageContext.ToolResults = append(pending, userMsg.UserInputMessageContext.ToolResults...)
+	if strings.TrimSpace(userMsg.Content) == "" {
+		userMsg.Content = kiroUserPlaceholderToolResults
+	}
+}
+
+func syntheticToolResultHistoryMessage(toolResults []ToolResult, modelID, origin string) *UserInputMessage {
+	if len(toolResults) == 0 {
+		return nil
+	}
+	return &UserInputMessage{
+		Content: kiroUserPlaceholderToolResults,
+		ModelId: modelID,
+		Origin:  origin,
+		UserInputMessageContext: &UserInputMessageContext{
+			ToolResults: toolResults,
+		},
+	}
 }
 
 func buildHistoryStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) []HistoryMessage {
@@ -937,23 +1003,6 @@ func mergeConsecutiveMessages(messages []ir.Message) []ir.Message {
 		merged = append(merged, msg)
 	}
 	return merged
-}
-
-func alternateRoles(messages []ir.Message) []ir.Message {
-	var alternated []ir.Message
-	for i, msg := range messages {
-		if i > 0 {
-			prev, curr := messages[i-1].Role, msg.Role
-			isUserLike := func(r ir.Role) bool { return r == ir.RoleUser || r == ir.RoleTool }
-			if isUserLike(prev) && isUserLike(curr) {
-				alternated = append(alternated, ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: kiroAssistantPlaceholder}}})
-			} else if prev == ir.RoleAssistant && curr == ir.RoleAssistant {
-				alternated = append(alternated, ir.Message{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: kiroUserPlaceholderEmpty}}})
-			}
-		}
-		alternated = append(alternated, msg)
-	}
-	return alternated
 }
 
 func findTrailingStart(messages []ir.Message) int {

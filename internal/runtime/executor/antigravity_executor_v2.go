@@ -210,7 +210,8 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
 	}
-	if errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload)
+	if errValidate != nil {
 		return resp, errValidate
 	}
 
@@ -240,7 +241,7 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 	}
 
 	// Build IR request (source format -> IR)
-	irReq, err := convertRequestToIR(opts.SourceFormat, baseModel, bytes.Clone(req.Payload), opts.Metadata)
+	irReq, err := convertRequestToIR(opts.SourceFormat, baseModel, bytes.Clone(originalPayload), opts.Metadata)
 	if err != nil {
 		return resp, err
 	}
@@ -441,7 +442,8 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
 	}
-	if errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload)
+	if errValidate != nil {
 		return nil, errValidate
 	}
 
@@ -470,7 +472,7 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 		}
 	}
 
-	irReq, err := convertRequestToIR(opts.SourceFormat, baseModel, bytes.Clone(req.Payload), opts.Metadata)
+	irReq, err := convertRequestToIR(opts.SourceFormat, baseModel, bytes.Clone(originalPayload), opts.Metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -725,7 +727,8 @@ func (e *AntigravityExecutorV2) CountTokens(ctx context.Context, auth *cliproxya
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
 	}
-	if errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(opts.SourceFormat, originalPayload)
+	if errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
 	// For now, call the upstream endpoint using the same request translation as legacy.
