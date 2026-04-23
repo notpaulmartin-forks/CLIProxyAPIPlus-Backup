@@ -18,6 +18,7 @@ builds:
       - -s -w -X 'main.Version={{.Version}}-plus' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
 archives:
   - id: "cli-proxy-api-plus"
+    name_template: "CLIProxyAPIPlus-Backup_{{ trimPrefix .Version \"v\" }}_{{ .Os }}_{{ .Arch }}"
     format: tar.gz
     format_overrides:
       - goos: windows
@@ -25,7 +26,6 @@ archives:
     files:
       - LICENSE
       - README.md
-      - README_CN.md
       - config.example.yaml
 
 checksum:
