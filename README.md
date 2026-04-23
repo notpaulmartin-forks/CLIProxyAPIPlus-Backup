@@ -1,3 +1,16 @@
+# CLIProxyAPIPlus-Backup
+
+Forked from [HALDRO/CLIProxyAPI-Extended](https://github.com/HALDRO/CLIProxyAPI-Extended)
+
+- Backup fork of the latest known public successor to `router-for-me/CLIProxyAPIPlus`.
+- Kept functionally identical to the source fork.
+
+**Install instructions**
+
+See the Quick Start and Getting Started sections below, plus the upstream documentation at [https://help.router-for.me/](https://help.router-for.me/).
+
+# Original CLIProxyAPI-Extended README
+
 # CLIProxyAPI-Extended
 
 > Fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) with advanced Canonical IR architecture and full Ollama compatibility.
@@ -9,7 +22,6 @@
 
 This fork pioneered the **Canonical IR architecture** before the official Plus version. As of January 28, 2026, it synchronizes with [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) while maintaining unique improvements:
 
-<<<<<<< HEAD
 | Feature | Description |
 |---------|-------------|
 | **Full Ollama Compatibility** | Complete bidirectional protocol support (`/api/chat`, `/api/generate`) with streaming — use any provider through Ollama API |
@@ -55,9 +67,6 @@ show-provider-prefixes: true     # Visual provider prefixes (default)
 ```
 
 **Result:** 21 files (7 parsers + 7 emitters + 6 IR core + 1 adapter), 7,992 lines
-=======
-## Contributing
->>>>>>> plus/main
 
 | Metric                    | Legacy        | Canonical IR  | Δ         |
 |---------------------------|---------------|---------------|-----------|
