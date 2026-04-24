@@ -12,7 +12,7 @@ type SDKConfig struct {
 	// ShowProviderPrefixes controls whether to add visual provider prefixes to model IDs
 	// in model listings (e.g., "[Gemini CLI] gemini-2.5-pro").
 	// This is purely cosmetic and does not affect routing.
-	// Default: true.
+	// Default: false.
 	ShowProviderPrefixes bool `yaml:"show-provider-prefixes" json:"show-provider-prefixes"`
 
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.

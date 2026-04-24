@@ -40,11 +40,11 @@ This fork pioneered the **Canonical IR architecture** before the official Plus v
 
 ## Quick Start
 
-New features are **enabled by default**:
+New configuration options:
 
 ```yaml
 use-canonical-translator: true   # Canonical IR architecture (default)
-show-provider-prefixes: true     # Visual provider prefixes (default)
+show-provider-prefixes: false    # Visual provider prefixes (default)
 ```
 
 **Provider prefixes:** Visual identification in model list (e.g., `[Gemini CLI] gemini-2.5-flash`). Purely cosmetic — models work with or without prefix.
