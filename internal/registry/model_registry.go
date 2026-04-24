@@ -128,8 +128,6 @@ type ModelRegistry struct {
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
 
-	// showProviderPrefixes controls whether to add visual provider prefixes to model IDs in listings.
-	showProviderPrefixes bool
 }
 
 // Global model registry instance
@@ -146,7 +144,6 @@ func GetGlobalRegistry() *ModelRegistry {
 			clientProviders:      make(map[string]string),
 			mutex:                &sync.RWMutex{},
 			availableModelsCache: make(map[string]availableModelsCacheEntry),
-			showProviderPrefixes: true,
 		}
 	})
 	return globalRegistry
@@ -180,16 +177,6 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		return cloneModelInfo(info)
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
-}
-
-// SetShowProviderPrefixes configures whether to display provider prefixes in model IDs.
-func (r *ModelRegistry) SetShowProviderPrefixes(enabled bool) {
-	if r == nil {
-		return
-	}
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	r.showProviderPrefixes = enabled
 }
 
 // SetHook sets an optional hook for observing model registration changes.
@@ -748,10 +735,6 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		return false
 	}
 
-	// Normalize model ID to remove any provider prefix
-	normalizedModelID, _ := ParseProviderPrefixedModelID(modelID)
-	modelID = normalizedModelID
-
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -842,20 +825,6 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
-			if r.showProviderPrefixes && registration.Providers != nil && len(registration.Providers) > 0 {
-				for provider := range registration.Providers {
-					modelInfoCopy := cloneModelInfo(registration.Info)
-					if modelInfoCopy == nil {
-						continue
-					}
-					modelInfoCopy.ID = formatProviderPrefixedModelID(provider, modelInfoCopy.ID)
-					model := r.convertModelToMap(modelInfoCopy, handlerType)
-					if model != nil {
-						models = append(models, model)
-					}
-				}
-				continue
-			}
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
 				models = append(models, model)
@@ -863,19 +832,14 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		}
 	}
 
-	// Sort by provider prefix, then model name, then ID (descending for reverse order)
+	// Sort by model name, then ID (descending for reverse order)
 	sort.SliceStable(models, func(i, j int) bool {
 		iID, _ := models[i]["id"].(string)
 		jID, _ := models[j]["id"].(string)
-		iModel, iPref := ParseProviderPrefixedModelID(iID)
-		jModel, jPref := ParseProviderPrefixedModelID(jID)
-		if iPref != jPref {
-			return iPref < jPref
+		if iID != jID {
+			return iID > jID
 		}
-		if iModel != jModel {
-			return iModel > jModel
-		}
-		return iID > jID
+		return false
 	})
 
 	return models, expiresAt
@@ -1051,10 +1015,6 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 // Returns:
 //   - int: Number of available clients for the model
 func (r *ModelRegistry) GetModelCount(modelID string) int {
-	// Normalize model ID to remove any provider prefix
-	normalizedModelID, _ := ParseProviderPrefixedModelID(modelID)
-	modelID = normalizedModelID
-
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -1088,10 +1048,6 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 // Returns:
 //   - []string: Provider identifiers ordered by availability count (descending)
 func (r *ModelRegistry) GetModelProviders(modelID string) []string {
-	// Normalize model ID to remove any provider prefix
-	normalizedModelID, _ := ParseProviderPrefixedModelID(modelID)
-	modelID = normalizedModelID
-
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -1149,13 +1105,6 @@ func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 		return nil
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
-
-	// Parse optional display prefix like "[Gemini CLI] gemini-2.5-pro".
-	normalizedModelID, providerID := ParseProviderPrefixedModelID(modelID)
-	if providerID != "" && provider == "" {
-		provider = providerID
-	}
-	modelID = normalizedModelID
 
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()

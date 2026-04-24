@@ -44,12 +44,9 @@ New configuration options:
 
 ```yaml
 use-canonical-translator: true   # Canonical IR architecture (default)
-show-provider-prefixes: false    # Visual provider prefixes (default)
 ```
 
-**Provider prefixes:** Visual identification in model list (e.g., `[Gemini CLI] gemini-2.5-flash`). Purely cosmetic — models work with or without prefix.
-
-**Provider selection:** Without prefix (or with prefixes disabled), system uses **round-robin** for load balancing.
+**Provider selection:** When multiple providers support the same model, the system uses **round-robin** for load balancing.
 
 **Note:** Ollama API requires `use-canonical-translator: true`
 

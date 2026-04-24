@@ -71,11 +71,6 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
-# When true, display provider prefixes in model IDs (e.g., "[Gemini CLI] gemini-2.5-pro")
-# This is purely visual and does not affect model routing to providers
-# Default: false (disabled)
-show-provider-prefixes: false
-
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
@@ -90,7 +85,7 @@ force-model-prefix: false
 #   - from: "gpt-4"                    # Client sends this model name
 #     to: "claude-sonnet-4"            # Route to this model instead
 #   - from: "gpt-4-turbo"
-#     to: "[Gemini CLI] gemini-2.5-pro" # Can include provider prefix for explicit routing
+#     to: "gemini-2.5-pro"              # Route directly to a specific model ID
 #   - from: "my-fast-model"
 #     to: "gemini-2.5-flash"           # Create custom shortcuts
 

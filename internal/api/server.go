@@ -29,7 +29,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -986,15 +985,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	// Update log level dynamically when debug flag changes
 	if oldCfg == nil || oldCfg.Debug != cfg.Debug {
 		util.SetLogLevel(cfg)
-	}
-
-	if oldCfg == nil || oldCfg.ShowProviderPrefixes != cfg.ShowProviderPrefixes {
-		registry.GetGlobalRegistry().SetShowProviderPrefixes(cfg.ShowProviderPrefixes)
-		if oldCfg != nil {
-			log.Debugf("show_provider_prefixes updated from %t to %t", oldCfg.ShowProviderPrefixes, cfg.ShowProviderPrefixes)
-		} else {
-			log.Debugf("show_provider_prefixes toggled to %t", cfg.ShowProviderPrefixes)
-		}
 	}
 
 	prevSecretEmpty := true

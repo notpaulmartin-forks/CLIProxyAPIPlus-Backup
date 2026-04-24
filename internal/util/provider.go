@@ -34,11 +34,6 @@ func GetProviderName(modelName string) []string {
 		return nil
 	}
 
-	normalizedModelName, providerID := registry.ParseProviderPrefixedModelID(modelName)
-	if providerID != "" {
-		return []string{providerID}
-	}
-
 	providers := make([]string, 0, 4)
 	seen := make(map[string]struct{})
 
@@ -53,7 +48,7 @@ func GetProviderName(modelName string) []string {
 		providers = append(providers, name)
 	}
 
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(normalizedModelName) {
+	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
 		appendProvider(provider)
 	}
 
@@ -84,8 +79,6 @@ func ResolveAutoModel(modelName string) string {
 	}
 
 	// Use empty string as handler type to get any available model.
-	// The model registry may return a provider-prefixed ID; normalize it here to
-	// keep downstream suffix parsing stable.
 	firstModel, err := registry.GetGlobalRegistry().GetFirstAvailableModel("")
 	if err != nil {
 		log.Warnf("Failed to resolve 'auto' model: %v, falling back to original model name", err)
@@ -93,10 +86,6 @@ func ResolveAutoModel(modelName string) string {
 	}
 
 	log.Infof("Resolved 'auto' model to: %s", firstModel)
-	normalized, _ := registry.ParseProviderPrefixedModelID(firstModel)
-	if normalized != "" {
-		return normalized
-	}
 	return firstModel
 }
 
